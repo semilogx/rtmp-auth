@@ -175,7 +175,7 @@ func RemoveHandler(store *Store) handleFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var errs []error
 		id := r.PostFormValue("id")
-
+		DropStreamPublisher(store, id)
 		err := store.RemoveStream(id)
 		if err != nil {
 			log.Println(err)
@@ -212,6 +212,9 @@ func BlockHandler(store *Store) handleFunc {
 		}
 
 		err := store.SetBlocked(id, newstate)
+		if newstate == true {
+			DropStreamPublisher(store, id)
+		}
 		log.Printf("%ved Stream %v (%v/%v)", action, id, app, name)
 		if err != nil {
 			log.Println(err)
@@ -239,6 +242,8 @@ func main() {
 	var frontendAddr = flag.String("frontendAddr", "localhost:8082", "Frontend bind address")
 	var insecure = flag.Bool("insecure", false, "Set to allow non-secure CSRF cookie")
 	var prefix = flag.String("subpath", "", "Set to allow running behind reverse-proxy at that subpath")
+	var ctrlurl = flag.String("ctrlurl", "",
+		"Set nginx-rtmp control url to allow dropping currently published streams (needs additional configuration for the nginx-rtmp module)")
 	flag.Parse()
 
 	store, err := NewStore(*path, strings.Split(*apps, ","), *prefix)
@@ -252,6 +257,11 @@ func main() {
 	}
 
 	CSRF := csrf.Protect(store.State.Secret, csrf.Secure(!*insecure))
+
+	err = store.SetCtrlUrl(*ctrlurl)
+	if err != nil {
+		log.Println(err)
+	}
 
 	api := mux.NewRouter()
 	api.Path("/publish").Methods("POST").HandlerFunc(PublishHandler(store))

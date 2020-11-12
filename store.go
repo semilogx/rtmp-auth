@@ -161,6 +161,19 @@ func (store *Store) AddStream(stream *storage.Stream) error {
 	return nil
 }
 
+func (store *Store) SetCtrlUrl(url string) error {
+	store.Lock()
+	defer store.Unlock()
+
+	store.State.CtrlUrl = url
+
+	if err := store.save(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (store *Store) RemoveStream(id string) error {
 	store.Lock()
 	defer store.Unlock()
@@ -204,6 +217,7 @@ func (store *Store) Expire() {
 	store.RUnlock()
 
 	for _, id := range toDelete {
+		DropStreamPublisher(store, id)
 		store.RemoveStream(id)
 	}
 }
