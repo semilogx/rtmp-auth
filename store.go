@@ -61,7 +61,18 @@ func (store *Store) Auth(app string, name string, auth string) (success bool, id
 			}
 		}
 	}
+
 	return false, ""
+}
+
+// GetStreamById returns a stream by its id
+func (store *Store) GetStreamById(id string) *storage.Stream {
+	for _, stream := range store.State.Streams {
+		if stream.Id == id {
+			return stream
+		}
+	}
+	return nil
 }
 
 // GetAppNameActive returns true if there is an active stream on app/name
@@ -80,7 +91,7 @@ func (store *Store) SetActive(id string) bool {
 	store.Lock()
 	defer store.Unlock()
 
-  success := false
+	success := false
 	for _, stream := range store.State.Streams {
 		if stream.Id == id {
 			stream.Active = true
