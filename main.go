@@ -329,6 +329,7 @@ func main() {
 	sub.Path("/add").Methods("POST").HandlerFunc(AddHandler(store))
 	sub.Path("/remove").Methods("POST").HandlerFunc(RemoveHandler(store))
 	sub.Path("/block").Methods("POST").HandlerFunc(BlockHandler(store))
+	sub.Path("/dumpscript").Methods("GET").HandlerFunc(DumpscriptHandler(store))
 	sub.PathPrefix("/public/").Handler(
 		http.StripPrefix(*prefix+"/public/", http.FileServer(statikFS)))
 
