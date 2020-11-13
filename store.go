@@ -145,7 +145,7 @@ func (store *Store) SetInactive(app string, name string) error {
 
 	stateChange := false
 	for _, stream := range store.State.Streams {
-		if stream.Application == app && stream.Name == name {
+		if stream.Application == app && stream.Name == name && stream.Active == true {
 			stream.Active = false
 			stateChange = true
 		}
