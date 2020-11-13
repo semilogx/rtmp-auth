@@ -151,7 +151,6 @@ func (store *Store) AddStream(stream *storage.Stream) error {
 	}
 
 	stream.Id = id.String()
-	stream.Blocked = false;
 	store.State.Streams = append(store.State.Streams, stream)
 
 	if err := store.save(); err != nil {
