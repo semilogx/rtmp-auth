@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -82,24 +84,41 @@ func PublishHandler(store *Store) handleFunc {
 		name := r.PostForm.Get("name")
 		auth := r.PostForm.Get("auth")
 
-		log.Printf("publish %s/%s auth: '%s'\n", app, name, auth)
+		log.Printf("Request to publish %v/%v auth: '%v'\n", app, name, auth)
 
-		success, id := store.Auth(app, name, auth)
-		if !success {
-			log.Printf("Publish %s %s/%s unauthorized\n", id, app, name)
-			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
+		id, err := store.Auth(app, name, auth)
+		if err != nil {
+			var e *authError
+			if errors.As(err, &e) {
+				switch e.Reason() {
+				case "unauthorized":
+					log.Printf("Authentication for %v/%v failed. %v\n", app, name, e)
+					http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
+					return
+				case "busy":
+					log.Printf("Authentication for stream %v on %v/%v succeeded. %v\n", id, app, name, e)
+					http.Error(w, "409 Conflict", http.StatusConflict)
+					return
+				case "blocked":
+					log.Printf("Authentication for stream %v on %v/%v succeeded. %v\n", id, app, name, e)
+					http.Error(w, "403 Forbidden", http.StatusForbidden)
+					return
+				}
+			}
+		}
+
+		if err = store.SetActive(id); err != nil {
+			log.Println(err)
 			return
 		}
 
-		store.SetActive(id)
-		log.Printf("Publish %s %s/%s ok\n", id, app, name)
+		log.Printf("Authentication for stream %v on %v/%v succeeded. Publish ok.\n", id, app, name)
 	}
 }
 
 func UnpublishHandler(store *Store) handleFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := r.ParseForm()
-		if err != nil {
+		if err := r.ParseForm(); err != nil {
 			log.Println("Failed to parse unpublish data:", err)
 			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 			return
@@ -108,8 +127,13 @@ func UnpublishHandler(store *Store) handleFunc {
 		app := r.PostForm.Get("app")
 		name := r.PostForm.Get("name")
 
-		store.SetInactive(app, name)
-		log.Printf("Unpublish %s/%s ok\n", app, name)
+		if err := store.SetInactive(app, name); err != nil {
+			fmt.Println("Unpublish failed:", err)
+			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		log.Printf("Unpublish %v/%v ok\n", app, name)
 	}
 }
 
@@ -119,9 +143,9 @@ func FormHandler(store *Store) handleFunc {
 			Store:        store.Get(),
 			CsrfTemplate: csrf.TemplateField(r),
 		}
-		err := templates.ExecuteTemplate(w, "form.html", data)
-		if err != nil {
-			log.Println("Template failed", err)
+
+		if err := templates.ExecuteTemplate(w, "form.html", data); err != nil {
+			log.Println("FormHandler: Template failed", err)
 		}
 	}
 }
@@ -138,6 +162,14 @@ func AddHandler(store *Store) handleFunc {
 		name := r.PostFormValue("name")
 		if len(name) == 0 {
 			errs = append(errs, fmt.Errorf("Stream name must be set"))
+		} else if name != url.PathEscape(name) {
+			errs = append(errs, fmt.Errorf("Stream name contains unsafe characters"))
+		}
+
+		// used by dumpscript, not user visible
+		blocked, err := strconv.ParseBool(r.PostFormValue("blocked"));
+		if err != nil {
+			blocked = false
 		}
 
 		// TODO: more validation
@@ -148,25 +180,29 @@ func AddHandler(store *Store) handleFunc {
 				AuthKey:     r.PostFormValue("auth_key"),
 				AuthExpire:  *expiry,
 				Notes:       r.PostFormValue("notes"),
+				Blocked:     blocked,
 			}
 
-			err := store.AddStream(stream)
-			log.Println("store add", stream, store.State)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("Failed to add stream: %v", err))
+			if err := store.AddStream(stream); err != nil {
+				errs = append(errs, fmt.Errorf("Failed to add stream."))
+				log.Printf("AddHandler: Failed to add stream. %v", err)
 			} else {
-				http.Redirect(w, r, "/", http.StatusSeeOther)
+				log.Println("New stream added:", stream)
+				// log.Println("Store add", stream, store.State)
 			}
 		}
 
-		data := TemplateData{
-			Store:        store.Get(),
-			CsrfTemplate: csrf.TemplateField(r),
-			Errors:       errs,
-		}
-		err := templates.ExecuteTemplate(w, "form.html", data)
-		if err != nil {
-			log.Println("Template failed", err)
+		if len(errs) > 0 {
+			data := TemplateData{
+				Store:        store.Get(),
+				CsrfTemplate: csrf.TemplateField(r),
+				Errors:       errs,
+			}
+			if err := templates.ExecuteTemplate(w, "form.html", data); err != nil {
+				log.Println("AddHandler: Template failed", err)
+			}
+		} else {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
 		}
 	}
 }
@@ -175,19 +211,38 @@ func RemoveHandler(store *Store) handleFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var errs []error
 		id := r.PostFormValue("id")
-		DropStreamPublisher(store, id)
-		err := store.RemoveStream(id)
+
+		stream, err := store.GetStreamById(id)
 		if err != nil {
-			log.Println(err)
-			errs = append(errs, fmt.Errorf("Failed to remove stream: %v", err))
+			errs = append(errs, fmt.Errorf("Couldn't remove stream"))
+			log.Printf("RemoveHandler: Stream id not found. %v", err)
+		} else {
+			app := stream.Application
+			name := stream.Name
+
+			if stream.Active {
+				DropStreamPublisher(store, id)
+			}
+
+			if err := store.RemoveStream(id); err != nil {
+				errs = append(errs, fmt.Errorf("Failed to remove stream."))
+				log.Printf("RemoveHandler: Failed to remove stream %v (%v/%v). %v", id, app, name, err)
+			} else {
+				// TODO: var stream is dangling at this point
+				// check what to do... stream = nil?
+				log.Printf("Removed stream %v (%v/%v)", id, app, name)
+			}
+		}
+
+		if len(errs) > 0 {
 			data := TemplateData{
 				Store:        store.Get(),
 				CsrfTemplate: csrf.TemplateField(r),
 				Errors:       errs,
 			}
-			err = templates.ExecuteTemplate(w, "form.html", data)
-			if err != nil {
-				log.Println("Template failed", err)
+
+			if err := templates.ExecuteTemplate(w, "form.html", data); err != nil {
+				log.Println("RemoveHandler: Template failed", err)
 			}
 		} else {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -199,35 +254,36 @@ func BlockHandler(store *Store) handleFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var errs []error
 		id := r.PostFormValue("id")
-		state, _ := strconv.ParseBool(r.PostFormValue("blocked"))
-		newstate, action := func(bool) (bool, string) { if state == true { return false, "unblock"} else {return true, "block"}}(state)
 
-		// Get Application/Name for stream id
-		var app, name string
-		for _, stream := range store.State.Streams {
-			if stream.Id == id {
-				app = stream.Application
-				name = stream.Name
+		app, name, err := store.GetAppNameById(id)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("Couldn't change stream block status."))
+			log.Printf("BlockHandler: %v", err)
+		} else {
+			state, _ := strconv.ParseBool(r.PostFormValue("blocked"))
+			newstate, action := func(bool) (bool, string) {
+				if state == true { return false, "unblock"} else {return true, "block"}
+			}(state)
+
+			if err := store.SetBlocked(id, newstate); err != nil {
+				errs = append(errs, fmt.Errorf("Failed to %v stream.", action))
+				log.Printf("BlockHandler: Failed to %v stream %v (%v/%v). %v", action, id, app, name, err)
+			} else {
+				if newstate == true {
+					DropStreamPublisher(store, id)
+				}
+				log.Printf("Stream %v (%v/%v) %ved", id, app, name, action)
 			}
 		}
 
-		err := store.SetBlocked(id, newstate)
-		if newstate == true {
-			DropStreamPublisher(store, id)
-		}
-		log.Printf("%ved Stream %v (%v/%v)", action, id, app, name)
-		if err != nil {
-			log.Println(err)
-			errs = append(errs, fmt.Errorf("Failed to %v stream %v (%v/%v)", action, id, app, name))
-
+		if len(errs) > 0 {
 			data := TemplateData{
 				Store:        store.Get(),
 				CsrfTemplate: csrf.TemplateField(r),
 				Errors:       errs,
 			}
-			err = templates.ExecuteTemplate(w, "form.html", data)
-			if err != nil {
-				log.Println("Template failed", err)
+			if err := templates.ExecuteTemplate(w, "form.html", data); err != nil {
+				log.Println("BlockHandler: Template failed", err)
 			}
 		} else {
 			http.Redirect(w, r, "/", http.StatusSeeOther)

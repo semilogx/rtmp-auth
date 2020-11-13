@@ -38,11 +38,23 @@ func NewStore(path string, apps []string, prefix string) (*Store, error) {
 	return store, nil
 }
 
+type authError struct {
+	errmsg string
+	reason string
+}
+
+func (e *authError) Error() string {
+	return fmt.Sprintf("%v", e.errmsg)
+}
+
+func (e *authError) Reason() string {
+	return e.reason
+}
+
 // Auth looks up if a given app/name/key tuple is allowed to publish.
-// Returns success (bool) and the matched streams id string
-// TODO: Return error values to distinguish i.e. 401 Unauthorized
-// and 409 Conflict return codes in the publish request handler
-func (store *Store) Auth(app string, name string, auth string) (success bool, id string) {
+// It returns the matched streams id and an error value of type authError
+// in case of failure or nil if authentication was successfull
+func (store *Store) Auth(app string, name string, auth string) (id string, err error) {
 	store.RLock()
 	defer store.RUnlock()
 
@@ -53,30 +65,52 @@ func (store *Store) Auth(app string, name string, auth string) (success bool, id
 				if stream.Active == true {
 					conflict = false
 				} else {
-					conflict = store.GetAppNameActive(app, name)
+					conflict = store.IsActiveByAppName(app, name)
 				}
-				return !conflict, stream.Id
+				if conflict == false {
+					return  stream.Id, nil
+				} else {
+					return stream.Id, &authError{"Publish denied. Resource busy.", "busy"}
+				}
 			} else {
-				return false, stream.Id
+				return stream.Id, &authError{"Publish denied. Stream blocked.", "blocked"}
 			}
 		}
 	}
-
-	return false, ""
+	return "", &authError{"Publish denied. Access unauthorized", "unauthorized"}
 }
 
-// GetStreamById returns a stream by its id
-func (store *Store) GetStreamById(id string) *storage.Stream {
+// GetStreamById searches the store for a given stream id.
+// It returns the matching *storage.Stream Object or an error if the id is not found.
+func (store *Store) GetStreamById(id string) (*storage.Stream, error) {
 	for _, stream := range store.State.Streams {
 		if stream.Id == id {
-			return stream
+			return stream, nil
 		}
 	}
-	return nil
+	return nil, fmt.Errorf("GetStreamById: Couldn't find stream matching id %v.", id)
 }
 
-// GetAppNameActive returns true if there is an active stream on app/name
-func (store *Store) GetAppNameActive(app string, name string) bool {
+// GetAppNameById searches the store for the Application and Name of a given stream id.
+// It returns app, name if the stream id was found or empty strings and an error otherwise.
+func (store *Store) GetAppNameById(id string) (app string, name string, err error) {
+	found := false
+	for _, stream := range store.State.Streams {
+		if stream.Id == id {
+			app = stream.Application
+			name = stream.Name
+			found = true
+		}
+	}
+	if !found {
+		return "", "", fmt.Errorf("Stream %v not found.", id)
+	}
+
+	return app, name, nil
+}
+
+// IsActiveByAppName returns true if there is an active stream on app/name
+func (store *Store) IsActiveByAppName(app string, name string) bool {
 	active := false
 	for _, stream := range store.State.Streams {
 		if stream.Application == app && stream.Name == name && stream.Active == true {
@@ -86,42 +120,45 @@ func (store *Store) GetAppNameActive(app string, name string) bool {
 	return active
 }
 
-// SetActive sets a stream to active state by its id, returns success
-func (store *Store) SetActive(id string) bool {
+// SetActive sets a stream to active state by its id.
+func (store *Store) SetActive(id string) error {
 	store.Lock()
 	defer store.Unlock()
 
-	success := false
 	for _, stream := range store.State.Streams {
 		if stream.Id == id {
 			stream.Active = true
 			if err := store.save(); err != nil {
-				log.Println(err)
+				return fmt.Errorf("Couldn't save active state for Stream %v (%v/%v)", id, stream.Application, stream.Name)
 			} else {
-				success = true
+				return nil
 			}
 		}
 	}
-	return success
+	return fmt.Errorf("SetActive failed: Stream id %v not found.", id)
 }
 
-// SetInactive unsets the active state for all streams defined for app/name, returns success
-func (store *Store) SetInactive(app string, name string) bool {
+// SetInactive unsets the active state for all streams defined for app/name.
+func (store *Store) SetInactive(app string, name string) error {
 	store.Lock()
 	defer store.Unlock()
 
-	success := false
+	stateChange := false
 	for _, stream := range store.State.Streams {
 		if stream.Application == app && stream.Name == name {
 			stream.Active = false
-			if err := store.save(); err != nil {
-				log.Println(err)
-			} else {
-				success = true
-			}
+			stateChange = true
 		}
 	}
-	return success
+	if stateChange == false {
+		return fmt.Errorf("SetInactive: Couldn't find active steams for %v/%v", app, name)
+	}
+
+	if err := store.save(); err != nil {
+		return fmt.Errorf("Couldn't save inactive state for %v/%v", app, name)
+	}
+
+	return nil
 }
 
 // SetBlocked changes a streams blocked state

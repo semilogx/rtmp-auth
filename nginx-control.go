@@ -13,9 +13,9 @@ func DropStreamPublisher(store *Store, id string) {
 	}
 
 	// Get streams application and name
-	stream := store.GetStreamById(id)
-	if stream == nil {
-		log.Printf("DropStreamPublisher: Stream %v not found", id)
+	stream, err := store.GetStreamById(id)
+	if err != nil {
+		log.Printf("DropStreamPublisher: Stream %v not found. %v", id, err)
 		return
 	}
 	app := stream.Application
