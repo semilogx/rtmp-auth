@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"errors"
 	"math/rand"
 	"os"
 	"sync"
@@ -68,7 +69,7 @@ func (store *Store) Auth(app string, name string, auth string) (id string, err e
 					conflict = store.IsActiveByAppName(app, name)
 				}
 				if conflict == false {
-					return  stream.Id, nil
+					return stream.Id, nil
 				} else {
 					// TODO: Check what nginx does if publisher dissapears. If
 					// it doesn't unpublish the stream, other connection attempts
@@ -159,7 +160,7 @@ func (store *Store) SetInactive(app string, name string) error {
 		}
 	}
 	if stateChange == false {
-		return fmt.Errorf("SetInactive: Couldn't find active steams for %v/%v", app, name)
+		return fmt.Errorf("SetInactive: Couldn't find active streams for %v/%v", app, name)
 	}
 
 	if err := store.save(); err != nil {
@@ -261,8 +262,17 @@ func (store *Store) Expire() {
 	store.RUnlock()
 
 	for _, id := range toDelete {
-		DropStreamPublisher(store, id)
-		store.RemoveStream(id)
+		var e *nginxControlError
+		if err := ReqDropStreamPublisher(store, id); err == nil {
+			log.Printf("Dropped publisher for stream id %v", id)
+		} else if errors.As(err, &e) {
+			if e.RequestSent {
+				log.Println(e)
+			}
+		}
+		if err := store.RemoveStream(id); err != nil {
+			log.Println(err)
+		}
 	}
 }
 

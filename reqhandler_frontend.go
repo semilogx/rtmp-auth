@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -95,8 +96,17 @@ func RemoveHandler(store *Store) handleFunc {
 			app := stream.Application
 			name := stream.Name
 
+			log.Printf("Rmove requested for stream %v (%v/%v)", id, app, name)
 			if stream.Active {
-				DropStreamPublisher(store, id)
+				log.Println("Stream active. Trying to drop publisher.")
+				var e *nginxControlError
+				if err := ReqDropStreamPublisher(store, id); err == nil {
+					log.Printf("Dropped publisher for stream id %v (%v/%v)", id, app, name)
+				} else if errors.As(err, &e) {
+					if e.RequestSent {
+						log.Println(e)
+					}
+				}
 			}
 
 			if err := store.RemoveStream(id); err != nil {
@@ -131,6 +141,7 @@ func BlockHandler(store *Store) handleFunc {
 		id := r.PostFormValue("id")
 
 		app, name, err := store.GetAppNameById(id)
+		log.Printf("Block requested for stream %v (%v/%v)", id, app, name)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("Couldn't change stream block status."))
 			log.Printf("BlockHandler: %v", err)
@@ -145,7 +156,15 @@ func BlockHandler(store *Store) handleFunc {
 				log.Printf("BlockHandler: Failed to %v stream %v (%v/%v). %v", action, id, app, name, err)
 			} else {
 				if newstate == true {
-					DropStreamPublisher(store, id)
+					log.Println("Stream active. Trying to drop publisher.")
+					var e *nginxControlError
+					if err := ReqDropStreamPublisher(store, id); err == nil {
+						log.Printf("Dropped publisher for stream id %v (%v/%v)", id, app, name)
+					} else if errors.As(err, &e) {
+						if e.RequestSent {
+							log.Println(e)
+						}
+					}
 				}
 				log.Printf("Stream %v (%v/%v) %ved", id, app, name, action)
 			}
