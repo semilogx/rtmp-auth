@@ -26,7 +26,7 @@ func PublishHandler(store *Store) handleFunc {
 		if err != nil {
 			var e *authError
 			if errors.As(err, &e) {
-				switch e.Reason() {
+				switch e.getReason() {
 				case "unauthorized":
 					log.Printf("Authentication for %v/%v failed. %v\n", app, name, e)
 					http.Error(w, "401 Unauthorized", http.StatusUnauthorized)

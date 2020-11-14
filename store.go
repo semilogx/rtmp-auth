@@ -39,16 +39,16 @@ func NewStore(path string, apps []string, prefix string) (*Store, error) {
 }
 
 type authError struct {
-	errmsg string
-	reason string
+	Msg string
+	Reason string
 }
 
 func (e *authError) Error() string {
-	return fmt.Sprintf("%v", e.errmsg)
+	return fmt.Sprintf("%v", e.Msg)
 }
 
-func (e *authError) Reason() string {
-	return e.reason
+func (e *authError) getReason() string {
+	return e.Reason
 }
 
 // Auth looks up if a given app/name/key tuple is allowed to publish.
@@ -70,6 +70,14 @@ func (store *Store) Auth(app string, name string, auth string) (id string, err e
 				if conflict == false {
 					return  stream.Id, nil
 				} else {
+					// TODO: Check what nginx does if publisher dissapears. If
+					// it doesn't unpublish the stream, other connection attempts
+					// shouldn't be blocked here.
+					// Alternative code (deactivate other streams, no error):
+					// if err := store.SetInactive(app, name); err != nil {
+					//		log.Println(err)
+					// }
+					// return nil
 					return stream.Id, &authError{"Publish denied. Resource busy.", "busy"}
 				}
 			} else {
